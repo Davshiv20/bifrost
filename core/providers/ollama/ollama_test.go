@@ -2,6 +2,7 @@ package ollama_test
 
 import (
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/maximhq/bifrost/core/internal/testutil"
@@ -22,7 +23,7 @@ import (
 //   - /api/tags for listing models
 func TestOllama(t *testing.T) {
 	t.Parallel()
-	if os.Getenv("OLLAMA_BASE_URL") == "" {
+	if strings.TrimSpace(os.Getenv("OLLAMA_BASE_URL")) == "" {
 		t.Skip("Skipping Ollama tests because OLLAMA_BASE_URL is not set")
 	}
 

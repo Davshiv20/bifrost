@@ -1,6 +1,7 @@
 package bedrock
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -10,7 +11,7 @@ import (
 )
 
 // convertParameters handles parameter conversion
-func convertChatParameters(bifrostReq *schemas.BifrostChatRequest, bedrockReq *BedrockConverseRequest) {
+func convertChatParameters(ctx *context.Context, bifrostReq *schemas.BifrostChatRequest, bedrockReq *BedrockConverseRequest) {
 	if bifrostReq.Params == nil {
 		return
 	}
@@ -18,9 +19,33 @@ func convertChatParameters(bifrostReq *schemas.BifrostChatRequest, bedrockReq *B
 	if inferenceConfig := convertInferenceConfig(bifrostReq.Params); inferenceConfig != nil {
 		bedrockReq.InferenceConfig = inferenceConfig
 	}
+
+	// Check for response_format and convert to tool
+	responseFormatTool := convertResponseFormatToTool(ctx, bifrostReq.Params)
+
 	// Convert tool config
 	if toolConfig := convertToolConfig(bifrostReq.Params); toolConfig != nil {
 		bedrockReq.ToolConfig = toolConfig
+	}
+
+	// If response_format was converted to a tool, add it to the tool config
+	if responseFormatTool != nil {
+		if bedrockReq.ToolConfig == nil {
+			bedrockReq.ToolConfig = &BedrockToolConfig{}
+		}
+		// Add the response format tool to the beginning of the tools list
+		bedrockReq.ToolConfig.Tools = append([]BedrockTool{*responseFormatTool}, bedrockReq.ToolConfig.Tools...)
+		// Force the model to use this specific tool
+		bedrockReq.ToolConfig.ToolChoice = &BedrockToolChoice{
+			Tool: &BedrockToolChoiceTool{
+				Name: responseFormatTool.ToolSpec.Name,
+			},
+		}
+	}
+	if bifrostReq.Params.ServiceTier != nil {
+		bedrockReq.ServiceTier = &BedrockServiceTier{
+			Type: *bifrostReq.Params.ServiceTier,
+		}
 	}
 	// Add extra parameters
 	if len(bifrostReq.Params.ExtraParams) > 0 {
@@ -369,6 +394,64 @@ func convertImageToBedrockSource(imageURL string) (*BedrockImageSource, error) {
 	}
 
 	return imageSource, nil
+}
+
+// convertResponseFormatToTool converts a response_format parameter to a Bedrock tool
+// Returns nil if no response_format is present or if it's not a json_schema type
+func convertResponseFormatToTool(ctx *context.Context, params *schemas.ChatParameters) *BedrockTool {
+	if params == nil || params.ResponseFormat == nil {
+		return nil
+	}
+
+	// ResponseFormat is stored as interface{}, need to parse it
+	responseFormatMap, ok := (*params.ResponseFormat).(map[string]interface{})
+	if !ok {
+		return nil
+	}
+
+	// Check if type is "json_schema"
+	formatType, ok := responseFormatMap["type"].(string)
+	if !ok || formatType != "json_schema" {
+		return nil
+	}
+
+	// Extract json_schema object
+	jsonSchemaObj, ok := responseFormatMap["json_schema"].(map[string]interface{})
+	if !ok {
+		return nil
+	}
+
+	// Extract name and schema
+	toolName, ok := jsonSchemaObj["name"].(string)
+	if !ok || toolName == "" {
+		toolName = "json_response"
+	}
+
+	schemaObj, ok := jsonSchemaObj["schema"].(map[string]interface{})
+	if !ok {
+		return nil
+	}
+
+	// Extract description from schema if available
+	description := "Returns structured JSON output"
+	if desc, ok := schemaObj["description"].(string); ok && desc != "" {
+		description = desc
+	}
+
+	// set bifrost context key structured output tool name
+	toolName = fmt.Sprintf("bf_so_%s", toolName)
+	(*ctx) = context.WithValue(*ctx, schemas.BifrostContextKeyStructuredOutputToolName, toolName)
+
+	// Create the Bedrock tool
+	return &BedrockTool{
+		ToolSpec: &BedrockToolSpec{
+			Name:        toolName,
+			Description: schemas.Ptr(description),
+			InputSchema: BedrockToolInputSchema{
+				JSON: schemaObj,
+			},
+		},
+	}
 }
 
 // convertInferenceConfig converts Bifrost parameters to Bedrock inference config
